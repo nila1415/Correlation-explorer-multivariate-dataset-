@@ -1,0 +1,437 @@
+import json
+from datetime import datetime
+
+import numpy as np
+import pandas as pd
+import plotly.express as px
+import streamlit as st
+
+st.set_page_config(
+    page_title="Correlation Explorer",
+    page_icon="📊",
+    layout="wide"
+)
+
+st.title("📊 Correlation Explorer for Multivariate Datasets")
+st.write("Upload, clean, analyze and visualize any CSV or Excel dataset.")
+
+# -------------------- FILE UPLOAD --------------------
+
+uploaded_file = st.sidebar.file_uploader(
+    "Upload your dataset",
+    type=["csv", "xlsx", "xls"]
+)
+
+use_sample = st.sidebar.button("Load Sample Dataset")
+
+if use_sample:
+    rng = np.random.default_rng(42)
+    study = rng.uniform(1, 8, 100)
+    attendance = np.clip(60 + study * 5 + rng.normal(0, 8, 100), 40, 100)
+    marks = np.clip(20 + study * 7 + rng.normal(0, 10, 100), 0, 100)
+
+    st.session_state["sample"] = pd.DataFrame({
+        "Study_Hours": study.round(1),
+        "Attendance": attendance.round(1),
+        "Internal_Marks": np.clip(marks + rng.normal(0, 5, 100), 0, 100).round(1),
+        "Final_Marks": marks.round(1),
+        "Department": rng.choice(["CSE", "ECE", "IT", "EEE"], 100)
+    })
+
+if uploaded_file is not None:
+    try:
+        if uploaded_file.name.lower().endswith(".csv"):
+            df = pd.read_csv(uploaded_file)
+        else:
+            df = pd.read_excel(uploaded_file)
+        st.session_state["sample"] = None
+    except Exception as error:
+        st.error(f"Unable to read the file: {error}")
+        st.stop()
+elif st.session_state.get("sample") is not None:
+    df = st.session_state["sample"].copy()
+else:
+    df = None
+
+if df is None:
+    st.info("Upload a CSV or Excel file, or click Load Sample Dataset.")
+    st.stop()
+
+if df.empty:
+    st.error("The dataset contains no rows.")
+    st.stop()
+
+# -------------------- DATASET OVERVIEW --------------------
+
+df.columns = [
+    str(c).strip() if str(c).strip() else f"Column_{i+1}"
+    for i, c in enumerate(df.columns)
+]
+
+st.header("1. Dataset Overview")
+
+c1, c2, c3, c4 = st.columns(4)
+c1.metric("Total Rows", len(df))
+c2.metric("Total Columns", len(df.columns))
+c3.metric("Missing Values", int(df.isna().sum().sum()))
+c4.metric("Duplicate Rows", int(df.duplicated().sum()))
+
+st.subheader("Dataset Preview")
+st.dataframe(df.head(100), use_container_width=True)
+
+profile = pd.DataFrame({
+    "Column": df.columns,
+    "Data Type": [str(df[c].dtype) for c in df.columns],
+    "Missing Values": [int(df[c].isna().sum()) for c in df.columns],
+    "Unique Values": [int(df[c].nunique()) for c in df.columns]
+})
+
+st.subheader("2. Column Information")
+st.dataframe(profile, use_container_width=True, hide_index=True)
+
+# -------------------- DATA CLEANING --------------------
+
+st.header("3. Data Cleaning")
+
+missing_action = st.selectbox(
+    "Choose missing-value handling",
+    [
+        "Keep original values",
+        "Remove rows containing missing values",
+        "Fill numeric with median and text with mode"
+    ]
+)
+
+remove_duplicates = st.checkbox("Remove duplicate rows")
+
+if st.button("Apply Data Cleaning", type="primary"):
+    cleaned = df.copy()
+
+    if missing_action == "Remove rows containing missing values":
+        cleaned = cleaned.dropna()
+
+    elif missing_action == "Fill numeric with median and text with mode":
+        for col in cleaned.columns:
+            if pd.api.types.is_numeric_dtype(cleaned[col]):
+                median = cleaned[col].median()
+                if pd.notna(median):
+                    cleaned[col] = cleaned[col].fillna(median)
+            else:
+                modes = cleaned[col].mode(dropna=True)
+                if not modes.empty:
+                    cleaned[col] = cleaned[col].fillna(modes.iloc[0])
+
+    if remove_duplicates:
+        cleaned = cleaned.drop_duplicates()
+
+    st.session_state["cleaned_df"] = cleaned
+    st.success(
+        f"Cleaning completed: {len(cleaned)} rows and "
+        f"{len(cleaned.columns)} columns."
+    )
+
+if "cleaned_df" in st.session_state:
+    df = st.session_state["cleaned_df"].copy()
+    st.dataframe(df.head(100), use_container_width=True)
+
+st.download_button(
+    "Download Dataset as CSV",
+    df.to_csv(index=False).encode("utf-8"),
+    file_name="cleaned_dataset.csv",
+    mime="text/csv"
+)
+
+# -------------------- CORRELATION ANALYSIS --------------------
+
+st.header("4. Correlation Explorer")
+
+numeric_columns = df.select_dtypes(include="number").columns.tolist()
+categorical_columns = df.select_dtypes(
+    exclude="number"
+).columns.tolist()
+
+method = st.selectbox(
+    "Select correlation method",
+    ["Pearson", "Spearman"]
+)
+
+if len(numeric_columns) >= 2:
+    numeric_df = df[numeric_columns].replace(
+        [np.inf, -np.inf], np.nan
+    )
+
+    correlation = numeric_df.corr(method=method.lower())
+
+    st.subheader("Correlation Heatmap")
+
+    fig = px.imshow(
+        correlation,
+        text_auto=".2f",
+        aspect="auto",
+        zmin=-1,
+        zmax=1,
+        color_continuous_scale="RdBu_r",
+        title=f"{method} Correlation Matrix"
+    )
+
+    st.plotly_chart(fig, use_container_width=True)
+
+    st.subheader("Correlation Values")
+    st.dataframe(correlation.round(3), use_container_width=True)
+
+    st.download_button(
+        "Download Correlation Matrix",
+        correlation.to_csv().encode("utf-8"),
+        file_name="correlation_matrix.csv",
+        mime="text/csv"
+    )
+
+    st.caption(
+        "Correlation ranges from -1 to +1. "
+        "Correlation does not prove causation."
+    )
+else:
+    correlation = pd.DataFrame()
+    st.warning(
+        "At least two numeric columns are required for correlation analysis."
+    )
+
+# -------------------- SCATTER PLOT --------------------
+
+st.header("5. Compare Two Variables")
+
+if len(numeric_columns) >= 2:
+    col1, col2 = st.columns(2)
+
+    x_col = col1.selectbox(
+        "Select X variable",
+        numeric_columns,
+        index=0,
+        key="scatter_x"
+    )
+
+    y_col = col2.selectbox(
+        "Select Y variable",
+        numeric_columns,
+        index=1,
+        key="scatter_y"
+    )
+
+    if x_col != y_col:
+        pair = df[[x_col, y_col]].dropna()
+
+        scatter = px.scatter(
+            pair,
+            x=x_col,
+            y=y_col,
+            trendline="ols",
+            title=f"{x_col} vs {y_col}"
+        )
+
+        st.plotly_chart(scatter, use_container_width=True)
+
+        if len(pair) >= 2:
+            r = pair[x_col].corr(pair[y_col], method=method.lower())
+            st.metric(
+                f"{method} Correlation Coefficient",
+                "N/A" if pd.isna(r) else f"{r:.3f}"
+            )
+    else:
+        st.info("Choose two different columns.")
+
+# -------------------- OTHER VISUALIZATIONS --------------------
+
+st.header("6. Data Visualization")
+
+chart_type = st.selectbox(
+    "Choose chart type",
+    ["Histogram", "Box Plot", "Scatter Plot", "Bar Chart"]
+)
+
+if chart_type == "Histogram":
+    options = numeric_columns or list(df.columns)
+    col = st.selectbox("Select column", options, key="hist_col")
+
+    fig = px.histogram(
+        df,
+        x=col,
+        title=f"Distribution of {col}"
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+elif chart_type == "Box Plot":
+    options = numeric_columns or list(df.columns)
+    col = st.selectbox("Select column", options, key="box_col")
+
+    fig = px.box(df, y=col, title=f"Box Plot of {col}")
+    st.plotly_chart(fig, use_container_width=True)
+
+elif chart_type == "Scatter Plot":
+    if len(numeric_columns) >= 2:
+        x = st.selectbox("X axis", numeric_columns, key="other_x")
+        y = st.selectbox("Y axis", numeric_columns, index=1, key="other_y")
+
+        color_options = ["None"] + categorical_columns
+        color = st.selectbox("Group by category", color_options)
+
+        fig = px.scatter(
+            df,
+            x=x,
+            y=y,
+            color=None if color == "None" else color,
+            title=f"{x} vs {y}"
+        )
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.warning("Two numeric columns are required for a scatter plot.")
+
+elif chart_type == "Bar Chart":
+    if categorical_columns:
+        cat = st.selectbox("Category column", categorical_columns)
+
+        if numeric_columns:
+            value = st.selectbox("Numeric column", numeric_columns)
+            grouped = df.groupby(cat, dropna=False)[value].mean().reset_index()
+
+            fig = px.bar(
+                grouped,
+                x=cat,
+                y=value,
+                title=f"Average {value} by {cat}"
+            )
+        else:
+            grouped = (
+                df[cat].fillna("(missing)")
+                .value_counts()
+                .rename_axis(cat)
+                .reset_index(name="Count")
+            )
+
+            fig = px.bar(grouped, x=cat, y="Count")
+
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.warning("No categorical columns were detected.")
+
+# -------------------- STATISTICAL SUMMARY --------------------
+
+st.header("7. Statistical Summary")
+
+if numeric_columns:
+    st.dataframe(
+        df[numeric_columns].describe().T.round(3),
+        use_container_width=True
+    )
+else:
+    st.info("No numeric columns are available for statistical summaries.")
+
+# -------------------- AUTOMATIC INSIGHTS --------------------
+
+st.header("8. Automatic Insights")
+
+insights = []
+
+missing_count = int(df.isna().sum().sum())
+duplicate_count = int(df.duplicated().sum())
+
+if missing_count:
+    insights.append(
+        f"The dataset contains {missing_count} missing values."
+    )
+else:
+    insights.append("No missing values were detected.")
+
+if duplicate_count:
+    insights.append(
+        f"The dataset contains {duplicate_count} duplicate rows."
+    )
+else:
+    insights.append("No duplicate rows were detected.")
+
+if len(numeric_columns) >= 2 and not correlation.empty:
+    pairs = []
+
+    for i, a in enumerate(correlation.columns):
+        for b in correlation.columns[i + 1:]:
+            value = correlation.loc[a, b]
+            if pd.notna(value):
+                pairs.append((abs(value), value, a, b))
+
+    if pairs:
+        pairs.sort(reverse=True)
+        _, value, a, b = pairs[0]
+
+        direction = (
+            "positive" if value > 0
+            else "negative" if value < 0
+            else "near-zero"
+        )
+
+        insights.append(
+            f"The strongest absolute correlation is between {a} and {b}: "
+            f"{value:.3f} ({direction})."
+        )
+
+    strong_count = sum(
+        abs(value) >= 0.7 for _, value, _, _ in pairs
+    )
+
+    insights.append(
+        f"{strong_count} variable pair(s) have an absolute "
+        "correlation of at least 0.70."
+    )
+else:
+    insights.append(
+        "At least two numeric columns are needed to discover correlations."
+    )
+
+for item in insights:
+    st.markdown(f"- {item}")
+
+# -------------------- REPORT DOWNLOAD --------------------
+
+st.header("9. Download Analysis Report")
+
+report = {
+    "project": "Correlation Explorer for Multivariate Datasets",
+    "generated_at": datetime.now().isoformat(timespec="seconds"),
+    "rows": int(df.shape[0]),
+    "columns": int(df.shape[1]),
+    "column_names": [str(c) for c in df.columns],
+    "data_types": {str(c): str(t) for c, t in df.dtypes.items()},
+    "missing_values": {
+        str(c): int(v) for c, v in df.isna().sum().items()
+    },
+    "duplicate_rows": int(df.duplicated().sum()),
+    "insights": insights,
+    "correlation_matrix": (
+        correlation.round(4).to_dict()
+        if not correlation.empty else {}
+    )
+}
+
+st.download_button(
+    "Download JSON Report",
+    json.dumps(report, indent=2, default=str).encode("utf-8"),
+    file_name="analysis_report.json",
+    mime="application/json"
+)
+
+st.download_button(
+    "Download Text Report",
+    (
+        "CORRELATION EXPLORER REPORT\n"
+        f"Generated: {report['generated_at']}\n"
+        f"Rows: {report['rows']}\n"
+        f"Columns: {report['columns']}\n\n"
+        "INSIGHTS\n" + "\n".join(f"- {i}" for i in insights) +
+        "\n\nNote: Correlation does not prove causation."
+    ).encode("utf-8"),
+    file_name="analysis_report.txt",
+    mime="text/plain"
+)
+
+st.divider()
+st.caption(
+    "Built with Python, Streamlit, Pandas, NumPy and Plotly."
+)
